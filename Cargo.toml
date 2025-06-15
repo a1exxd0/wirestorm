@@ -3,11 +3,6 @@ name = "wirestorm"
 version = "0.1.0"
 edition = "2024"
 
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
-
 [dependencies]
+thiserror = "2.0.12"
 tracing = "0.1.41"
