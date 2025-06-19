@@ -1,68 +1,51 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use crate::{ctmp::Ctmp, Error};
-
-const BUFFER_SIZE: usize = 0x400;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 pub struct MessageMgr {
-    messages: [Ctmp; BUFFER_SIZE],
-    read_pos: AtomicUsize,
-    write_pos: AtomicUsize,
+    messages: Arc<Mutex<VecDeque<bytes::Bytes>>>,
 }
-
-unsafe impl Sync for MessageMgr {}
 
 #[allow(dead_code)]
 impl MessageMgr {
     pub fn new() -> Self {
         MessageMgr {
-            messages: ::core::array::from_fn(|_| Ctmp::default()),
-            read_pos: AtomicUsize::new(0),
-            write_pos: AtomicUsize::new(0),
+            messages: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
-    pub fn write(&self, data: Ctmp) -> Result<(), Error> {
-        let write_idx = self.write_pos.load(Ordering::Relaxed);
-        let read_idx = self.read_pos.load(Ordering::Acquire);
-
-        let next_write = (write_idx + 1) % BUFFER_SIZE;
-        if next_write == read_idx {
-            return Err(Error::BufferWriteOverflow);
-        }
-
-        let slot = unsafe { &mut *self.messages.as_ptr().add(write_idx).cast_mut() };
-        *slot = data;
-
-        self.write_pos.store(next_write, Ordering::Release);
-        Ok(())
+    pub fn write(&self, data: bytes::Bytes) {
+        let mut queue = self.messages.lock().unwrap();
+        queue.push_back(data);
+        let buffer_size = queue.len();
+        tracing::trace!(buffer_size, "written to message buffer");
     }
 
-    /// needs to return a vector of owned msgs because we need to copy out messages 
-    /// before it gets overwritten by producer
-    /// 
-    /// this is batched since we require clones and allocs, the other is cheap
-    pub fn read_batch(&self, max_batch: usize) -> Vec<Ctmp> {
-        let mut read_idx = self.read_pos.load(Ordering::Acquire);
-        let write_idx = self.write_pos.load(Ordering::Acquire);
-
-        let msg_diff = if write_idx >= read_idx {
-            write_idx - read_idx
-        } else {
-            BUFFER_SIZE - read_idx + write_idx
+    pub fn read_batch(&self, max_batch: usize) -> Vec<bytes::Bytes> {
+        let mut queue = match self.messages.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => {
+                tracing::warn!("found poisoned message mgr lock, returning inner");
+                poisoned.into_inner()
+            }
         };
 
-        let batch_size = msg_diff.min(max_batch);
-        let mut res = Vec::with_capacity(batch_size);
+        let will_read = std::cmp::min(max_batch, queue.len());
+        let mut batch = Vec::with_capacity(will_read);
 
-        while read_idx != write_idx {
-            let slot = unsafe { &*self.messages.as_ptr().add(read_idx) };
-            res.push(slot.clone());
-
-            read_idx = (read_idx + 1) % BUFFER_SIZE;
+        // Actually remove messages from the queue
+        for _ in 0..will_read {
+            if let Some(msg) = queue.pop_front() {
+                batch.push(msg);
+            }
         }
 
-        self.read_pos.store(write_idx, Ordering::Release);
-        res
+        tracing::trace!(
+            read_count = batch.len(),
+            remaining = queue.len(),
+            "read batch"
+        );
+        batch
     }
 }
