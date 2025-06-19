@@ -16,7 +16,13 @@ impl MessageMgr {
     }
 
     pub fn write(&self, data: bytes::Bytes) {
-        let mut queue = self.messages.lock().unwrap();
+        let mut queue = match self.messages.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => {
+                tracing::warn!("found poisoned message mgr lock, returning inner");
+                poisoned.into_inner()
+            }
+        };
         queue.push_back(data);
         let buffer_size = queue.len();
         tracing::trace!(buffer_size, "written to message buffer");
