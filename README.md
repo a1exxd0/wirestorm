@@ -11,3 +11,6 @@ Once you are in the project root, run:
 ```sh
 cargo build --release
 ```
+
+# ADR
+The [ADR](./ADR.md) documents some assumptions I made during development, and informed overall design decisions.
